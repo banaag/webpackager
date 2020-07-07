@@ -111,9 +111,11 @@ func (c *SXGConfig) verify() error {
 	if err := verifyURL(c.ValidityURL); err != nil {
 		errs = multierror.Append(errs, wrapError("ValidityURL", err))
 	}
-
 	if err := c.Cert.verify(); err != nil {
 		errs = multierror.Append(errs, wrapError("Cert", err))
+	}
+	if err := c.ACME.verify(); err != nil {
+		errs = multierror.Append(errs, wrapError("ACME", err))
 	}
 
 	return errs.ErrorOrNil()
@@ -127,6 +129,28 @@ func (c *SXGCertConfig) verify() error {
 	}
 	if c.KeyFile == "" {
 		errs = multierror.Append(errs, wrapError("KeyFile", errEmpty))
+	}
+
+	return errs.ErrorOrNil()
+}
+
+func (c *SXGACMEConfig) verify() error {
+	var errs *multierror.Error
+
+	if !c.EnableCertAutoRenew {
+		return errs.ErrorOrNil()
+	}
+
+	if c.DiscoveryURL == "" {
+		errs = multierror.Append(errs, wrapError("DiscoveryURL", errEmpty))
+	}
+	if c.Email == "" {
+		errs = multierror.Append(errs, wrapError("Email", errEmpty))
+	}
+
+	if c.HTTPWebRootDir == "" && c.HTTPChallengePort == 0 &&
+		c.TLSChallengePort == 0 && c.DNSProvider == "" {
+		errs = multierror.Append(errs, wrapError("at least one of HTTPWebRootDir, HTTPChallengePort, TLSChallengePort or DNSProvider has to be non-empty", errEmpty))
 	}
 
 	return errs.ErrorOrNil()
