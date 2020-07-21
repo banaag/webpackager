@@ -17,6 +17,7 @@ package acmeclient
 import (
 	"crypto/x509"
 	"errors"
+	"log"
 	"strconv"
 	"time"
 
@@ -39,6 +40,15 @@ type Client struct {
 	CertSignRequest *x509.CertificateRequest
 	FetchTiming     certmanager.FetchTiming
 }
+
+// Recommended renewal duration for certs. This is duration before next cert
+// expiry.
+// 8 days is recommended duration to start requesting new certs to allow for
+// ACME server outages. It's 6 days + 2 days renewal grace period. 6 days so
+// that generated SXGs are valid for their full lifetime, plus 2 days in front
+// of that to allow time for the new cert to be obtained.
+// TODO(banaag): make 2 days renewal grace period configurable in toml.
+const certRenewalInterval = 8 * 24 * time.Hour
 
 var _ certmanager.RawChainSource = (*Client)(nil)
 
@@ -187,8 +197,13 @@ func NewClient(config Config) (*Client, error) {
 	}, nil
 }
 
-// Fetch acquires a new RawChain from the ACME server.
+// Fetch acquires a new RawChain from the ACME server if the current cert is
+// either expired or about to expire as compared to certRenewalInterval.
 func (c *Client) Fetch(chain *certchain.RawChain, now func() time.Time) (newChain *certchain.RawChain, nextRun futureevent.Event, err error) {
+	if !shouldRenewCert(chain, now) {
+		return chain, c.FetchTiming.GetNextRun(), nil
+	}
+
 	// Each resource comes back with the cert bytes, the bytes of the client's
 	// private key, and a certificate URL.
 	resource, err := c.LegoClient.Certificate.ObtainForCSR(*c.CertSignRequest, true)
@@ -214,4 +229,40 @@ func (c *Client) Fetch(chain *certchain.RawChain, now func() time.Time) (newChai
 	}
 
 	return newChain, c.FetchTiming.GetNextRun(), err
+}
+
+func shouldRenewCert(chain *certchain.RawChain, now func() time.Time) bool {
+	if chain == nil {
+		return true
+	}
+
+	d, err := getDurationToExpiry(chain.Certs[0], now())
+	if err != nil {
+		// Current cert is already invalid. We should attempt renewal.
+		log.Println("Current cert is expired, attempting to renew: ", err)
+		return true
+	}
+
+	if d < time.Duration(certRenewalInterval) {
+		// Cert is still valid, but we need to start cert renewals.
+		log.Println("Current cert is close to expiry threshold, attempting to renew.")
+		return true
+	}
+
+	return false
+}
+
+// getDurationToExpiry returns the Duration of time before cert expires with
+// given deadline.  Note that the certExpiryDeadline should be the expected SXG
+// expiration time. Returns error if cert is already expired. This will be used
+// to periodically check if cert is still within validity range.
+func getDurationToExpiry(cert *x509.Certificate, certExpiryDeadline time.Time) (time.Duration, error) {
+	if cert.NotBefore.After(certExpiryDeadline) {
+		return 0, errors.New("Certificate is future-dated")
+	}
+	if cert.NotAfter.Before(certExpiryDeadline) {
+		return 0, errors.New("Certificate is expired")
+	}
+
+	return cert.NotAfter.Sub(certExpiryDeadline), nil
 }
